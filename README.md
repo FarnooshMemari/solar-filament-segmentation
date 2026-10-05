@@ -18,12 +18,15 @@ false ones, and filaments split into pieces.
 | Step | What happens |
 | --- | --- |
 | Preprocess | Find the solar disk, normalize brightness on the disk, downscale to 1024x1024 (`--scale`) |
+| Extra inputs (run 3) | Three more channels: the image with limb darkening removed (each pixel divided by the median brightness at the same distance from the disk center), local contrast, and a dark-ridge map (Hessian response at three widths) that highlights thin filaments |
 | Labels | Up to three annotators labeled each image and they disagree, so the target is the share of annotators who marked each pixel (a soft label) |
 | Model | Compact U-Net (7.8M parameters) trained from scratch, no external weights |
 | Training | Random 512x512 crops, 70% centered on a filament; flips, rotations, brightness jitter; BCE + Dice loss; AdamW with a one-cycle schedule; mixed precision on GPU |
+| Folds (run 3) | Four models, each holding out a quarter of the months, with averaged (EMA) weights; every training image gets an out-of-fold prediction, and the test set is predicted by averaging the four models |
 | Inference | Sliding window with blended tiles, optional test-time augmentation (4 flips, or 8 flips and rotations), upsampled to 2048x2048 |
 | Instances | Low threshold on the disk, optional gap closing and hole filling, optional joining of nearby fragments, connected components; a piece is kept only if one of its pixels passes the high threshold and it is big enough |
-| Tuning | About 1,600 combinations of those settings are scored on held-out months with the host's PQ counting rule; pieces are encoded and matched once per image, so the search takes minutes |
+| Tuning | Hundreds to thousands of combinations of those settings are scored on held-out months with the host's PQ counting rule; pieces are encoded and matched once per image, so the search takes minutes |
+| Picker (run 3) | A LightGBM model predicts each piece's matched IoU averaged over the annotators from its size, shape, confidence, position and brightness. A piece raises PQ only when that value is above half the current PQ, so pieces are kept above a cut-off tuned out of fold. Used only if it beats the threshold rule out of fold |
 | Submission | One COCO RLE per filament, checked for format and overlaps before upload |
 
 Validation holds out whole months of observations, so frames taken hours apart never end
@@ -38,6 +41,10 @@ up on both sides of the split.
 To redo only the steps after training with an already trained model, use
 `notebooks/kaggle_retune.ipynb` and add the training notebook's output as an input.
 
+Run 3 (extra input channels, four fold models, the picker) is
+`notebooks/kaggle_run3.ipynb`. It needs *GPU T4 x2*, trains two folds at a time and takes
+about 3 hours.
+
 Or run the steps yourself:
 
 ```bash
@@ -47,6 +54,22 @@ python scripts/tune.py --run runs/baseline --tta 8       # pick post-processing 
 python scripts/predict.py --run runs/baseline --out submission.csv
 python scripts/check_submission.py --csv submission.csv  # must print submission=ok
 python scripts/visualize.py --run runs/baseline --n 4    # figures for the report
+```
+
+The run 3 steps:
+
+```bash
+python scripts/cache.py --out /tmp/cache --channels z,flat,contrast,ridge   # inputs computed once
+for k in 0 1 2 3; do
+  python scripts/train.py --out runs/fold$k --folds 4 --fold $k --cache /tmp/cache \
+      --channels z,flat,contrast,ridge --epochs 40 --ema 0.999 --tile 1024
+  python scripts/oof.py --run runs/fold$k --cache /tmp/cache --out /tmp/probs --test --tta 8
+done
+python scripts/tune.py --probs /tmp/probs --cache /tmp/cache --out runs/run3   # on all 707 images
+python scripts/scorer.py --probs /tmp/probs --cache /tmp/cache --post runs/run3/postprocess.json \
+    --runs runs/fold0 runs/fold1 runs/fold2 runs/fold3 --out runs/run3
+python scripts/predict.py --probs /tmp/probs --cache /tmp/cache --params runs/run3/postprocess.json \
+    --picker runs/run3 --out submission.csv                                      # drop --picker for the rule
 ```
 
 The data folder is found automatically under `/kaggle/input`. Elsewhere, pass
@@ -90,30 +113,31 @@ stayed near 0.66. On the test set it found 1,315 filaments in 180 images.
 
 ## Ideas to try next
 
-- High thresholds above 0.9: the best value in run 2 was the largest one tried
-- Pick which pieces to submit with a small model that predicts each piece's matched IoU
-  (a piece raises PQ only if that is above half the current PQ)
-- Extra input channels: limb-darkening correction and local contrast
 - Native resolution (`--scale 1.0`) to keep the thinnest filaments
-- Bigger model (`--base 48`) or longer training
+- Bigger model (`--base 48`)
 - A loss that rewards connected shapes (e.g. clDice) to reduce fragmentation
-- Ensembling models trained on different splits
 - Splitting by 27-day solar rotations instead of calendar months
 
 ## Repository layout
 
 ```
 solarseg/            library code
-  data.py            annotations, images, masks, disk detection, splits
+  data.py            annotations, images, masks, disk detection, splits and month folds
+  features.py        extra input channels (limb darkening removed, local contrast, dark ridges)
+  cache.py           inputs, targets and probability maps stored once on disk
   dataset.py         random training crops
   model.py           U-Net
   losses.py          BCE + Dice
+  ema.py             averaged (EMA) weights
   infer.py           sliding-window inference
   postprocess.py     probability map -> filament instances
+  tuning.py          fast search over post-processing settings
+  pieces.py          per-piece features and PQ maths for the picker
   metrics.py         Panoptic Quality
   rle.py             masks <-> submission CSV
-scripts/             one command per step (inspect, train, tune, predict, check, visualize)
-notebooks/           Kaggle notebook that runs the whole pipeline
+scripts/             one command per step (inspect, cache, train, oof, tune, scorer, predict,
+                     check, visualize)
+notebooks/           Kaggle notebooks: full pipeline, re-tune, run 3
 tests/               unit tests and an end-to-end run on synthetic data
 ```
 
@@ -123,6 +147,14 @@ tests/               unit tests and an end-to-end run on synthetic data
   labels for the test images, which the rules don't allow.
 - Rejected uploads still count toward the daily submission limit, so every file goes
   through `check_submission.py` first.
+
+## Credits
+
+The run 3 input channels (radial flat-fielding, local contrast and a scale-normalized
+dark-ridge response) and the idea of scoring each piece and keeping it only above about half
+the current PQ come from the public notebook
+[Solar Filament Segmentation 2026 (0.37)](https://www.kaggle.com/code/tushhaaarrrr/solar-filament-segmentation-2026-0-37)
+by tushhaaarrrr (Apache 2.0). The code in this repository is a separate implementation.
 
 ## License and data
 
