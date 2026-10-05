@@ -1,9 +1,15 @@
 #!/usr/bin/env python
-"""Train the U-Net baseline.
+"""Train the U-Net.
 
-Typical run on a Kaggle GPU notebook (about 30-45 minutes):
+Typical run on a Kaggle GPU notebook (about 50 minutes on one T4):
 
     python scripts/train.py --out runs/baseline
+
+One fold of the run 3 setup (extra input channels from a cache, EMA weights):
+
+    python scripts/cache.py --out /kaggle/temp/cache
+    python scripts/train.py --out runs/fold0 --folds 4 --fold 0 --cache /kaggle/temp/cache \
+        --channels z,flat,contrast,ridge --epochs 40 --ema 0.999
 
 Quick smoke test on CPU:
 
@@ -23,7 +29,9 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
+from solarseg.cache import load_x, load_y, read_meta  # noqa: E402
 from solarseg.data import (  # noqa: E402
+    fold_split,
     group_by_stem,
     load_records,
     preprocess,
@@ -34,6 +42,8 @@ from solarseg.data import (  # noqa: E402
     split_stems,
 )
 from solarseg.dataset import CropDataset  # noqa: E402
+from solarseg.ema import ModelEMA  # noqa: E402
+from solarseg.features import parse_channels  # noqa: E402
 from solarseg.infer import get_device, predict_prob  # noqa: E402
 from solarseg.losses import BCEDiceLoss  # noqa: E402
 from solarseg.model import build_model, count_parameters  # noqa: E402
@@ -55,6 +65,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pos-weight", type=float, default=3.0, help="BCE weight on filament pixels")
     p.add_argument("--pos-frac", type=float, default=0.7, help="share of crops centered on a filament")
     p.add_argument("--val-frac", type=float, default=0.15)
+    p.add_argument("--folds", type=int, default=0, help="k-fold split by month (0 = one split with --val-frac)")
+    p.add_argument("--fold", type=int, default=0, help="which fold to hold out when --folds > 0")
+    p.add_argument("--channels", default="z", help="input channels, e.g. z,flat,contrast,ridge")
+    p.add_argument("--cache", default=None, help="folder made by scripts/cache.py (inputs and targets)")
+    p.add_argument("--ema", type=float, default=0.0, help="EMA decay for the saved weights (0 = off)")
     p.add_argument("--all-data", action="store_true", help="train on every image, no validation split")
     p.add_argument("--max-images", type=int, default=0, help="debug: use only the first N images")
     p.add_argument("--val-every", type=int, default=1)
@@ -66,13 +81,15 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def load_stems(stems, groups, scale, label="train"):
+def load_stems(stems, groups, scale, label="train", channels=("z",), cache=None):
+    if cache:  # memory-mapped, shared with other runs through the page cache
+        return [load_x(cache, s) for s in stems], [load_y(cache, s) for s in stems]
     images, targets = [], []
     t0 = time.time()
     for i, stem in enumerate(stems, 1):
         recs = groups[stem]
         img = read_image(recs[0].image_path)
-        x, _ = preprocess(img, scale)
+        x, _ = preprocess(img, scale, channels)
         y = resize_target(soft_target(recs), scale)
         images.append(x.astype(np.float16))
         targets.append(y.astype(np.float16))
@@ -86,7 +103,7 @@ def validate(model, images, targets, device, tile, overlap):
     model.eval()
     inter = denom = 0.0
     for x, y in zip(images, targets):
-        prob = predict_prob(model, x.astype(np.float32), device, tile=tile, overlap=overlap)
+        prob = predict_prob(model, np.asarray(x, dtype=np.float32), device, tile=tile, overlap=overlap)
         pred = prob >= 0.5
         gt = y.astype(np.float32) >= 0.5
         inter += float(np.logical_and(pred, gt).sum())
@@ -111,18 +128,29 @@ def main() -> None:
     stems = list(groups)
     if args.max_images:
         stems = stems[: args.max_images]
+    channels = parse_channels(args.channels)
+    if args.cache:
+        meta = read_meta(args.cache)
+        if tuple(meta["channels"]) != channels or meta["scale"] != args.scale:
+            sys.exit(f"cache has channels {meta['channels']} at scale {meta['scale']}; "
+                     f"asked for {list(channels)} at {args.scale}")
     if args.all_data:
         train_stems, val_stems = stems, []
+    elif args.folds > 1:
+        train_stems, val_stems = fold_split(stems, args.folds, args.fold, args.seed)
     else:
         train_stems, val_stems = split_stems(stems, args.val_frac, args.seed)
-    (out / "split.json").write_text(json.dumps({"train": train_stems, "val": val_stems}, indent=1))
-    print(f"train images: {len(train_stems)}  validation images: {len(val_stems)}")
+    split = {"train": train_stems, "val": val_stems, "folds": args.folds, "fold": args.fold}
+    (out / "split.json").write_text(json.dumps(split, indent=1))
+    print(f"train images: {len(train_stems)}  validation images: {len(val_stems)}  channels: {','.join(channels)}")
 
-    train_x, train_y = load_stems(train_stems, groups, args.scale, "train")
-    val_x, val_y = load_stems(val_stems, groups, args.scale, "val") if val_stems else ([], [])
+    train_x, train_y = load_stems(train_stems, groups, args.scale, "train", channels, args.cache)
+    val_x, val_y = load_stems(val_stems, groups, args.scale, "val", channels, args.cache) if val_stems else ([], [])
 
     config = {k: v for k, v in vars(args).items()}
-    model = build_model(base=args.base, depth=args.depth).to(device)
+    config["channels"] = list(channels)
+    model = build_model(base=args.base, depth=args.depth, in_ch=len(channels)).to(device)
+    ema = ModelEMA(model, args.ema) if args.ema > 0 else None
     print(f"model parameters: {count_parameters(model):,}")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     total_steps = args.epochs * args.steps_per_epoch
@@ -164,17 +192,20 @@ def main() -> None:
             scaler.step(opt)
             scaler.update()
             sched.step()
+            if ema is not None:
+                ema.update(model)
             losses.append(float(loss.item()))
 
+        eval_model = ema.model if ema is not None else model  # EMA weights are what we keep
         row = {"epoch": epoch, "train_loss": round(float(np.mean(losses)), 5), "lr": opt.param_groups[0]["lr"]}
         if val_x and (epoch % args.val_every == 0 or epoch == args.epochs):
-            row["val_dice"] = round(validate(model, val_x, val_y, device, args.tile, args.overlap), 5)
+            row["val_dice"] = round(validate(eval_model, val_x, val_y, device, args.tile, args.overlap), 5)
         row["seconds"] = round(time.time() - t0, 1)
         print(json.dumps(row), flush=True)
         with open(log_path, "a") as f:
             f.write(json.dumps(row) + "\n")
 
-        ckpt = {"model": model.state_dict(), "config": config, "epoch": epoch, "metrics": row}
+        ckpt = {"model": eval_model.state_dict(), "config": config, "epoch": epoch, "metrics": row}
         torch.save(ckpt, out / "last.pt")
         if not val_x:
             torch.save(ckpt, out / "best.pt")  # no validation: keep the latest weights

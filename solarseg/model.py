@@ -49,8 +49,8 @@ class UNet(nn.Module):
         return self.head(x)
 
 
-def build_model(base: int = 32, depth: int = 4) -> UNet:
-    return UNet(in_ch=1, out_ch=1, base=base, depth=depth)
+def build_model(base: int = 32, depth: int = 4, in_ch: int = 1) -> UNet:
+    return UNet(in_ch=in_ch, out_ch=1, base=base, depth=depth)
 
 
 def count_parameters(model: nn.Module) -> int:

@@ -305,14 +305,23 @@ def working_size(height: int, width: int, scale: float) -> tuple[int, int]:
     return max(32, int(round(height * scale))), max(32, int(round(width * scale)))
 
 
-def preprocess(img: np.ndarray, scale: float) -> tuple[np.ndarray, np.ndarray]:
-    """Full-resolution uint8 image -> (normalized image at working size, full-res disk mask)."""
+def preprocess(img: np.ndarray, scale: float, channels=("z",)) -> tuple[np.ndarray, np.ndarray]:
+    """Full-resolution uint8 image -> (network input at working size, full-res disk mask).
+
+    With the default single ``z`` channel the input is a 2-D array (the original pipeline);
+    with several channels (see solarseg/features.py) it is (C, H, W).
+    """
+    from .features import compute_channels, parse_channels
+
+    channels = parse_channels(channels)
     disk = disk_mask(img)
-    x = normalize(img, disk)
     h, w = working_size(*img.shape, scale)
-    if (h, w) != img.shape:
-        x = cv2.resize(x, (w, h), interpolation=cv2.INTER_AREA)
-    return x.astype(np.float32), disk
+    if channels == ("z",):
+        x = normalize(img, disk)
+        if (h, w) != img.shape:
+            x = cv2.resize(x, (w, h), interpolation=cv2.INTER_AREA)
+        return x.astype(np.float32), disk
+    return compute_channels(img, disk, (h, w), channels), disk
 
 
 def resize_target(target: np.ndarray, scale: float) -> np.ndarray:
@@ -340,3 +349,35 @@ def split_stems(stems: list[str], val_frac: float = 0.15, seed: int = 42) -> tup
     if not train:  # tiny datasets: keep at least one training image
         train, val = val[:1], val[1:]
     return sorted(train), sorted(val)
+
+
+def month_folds(stems: list[str], n_folds: int, seed: int = 42) -> dict[str, int]:
+    """Assign every image to one of ``n_folds`` folds, keeping whole months together.
+
+    Months are shuffled, then each goes to the fold with the fewest images so far, so the
+    folds end up about the same size and frames hours apart never straddle two folds.
+    """
+    months: dict[str, list[str]] = defaultdict(list)
+    for s in stems:
+        months[s[:6]].append(s)
+    keys = sorted(months)
+    random.Random(seed).shuffle(keys)
+    keys.sort(key=lambda k: -len(months[k]))  # big months first gives a tighter balance
+    sizes = [0] * n_folds
+    fold_of: dict[str, int] = {}
+    for k in keys:
+        f = min(range(n_folds), key=lambda i: (sizes[i], i))
+        for s in months[k]:
+            fold_of[s] = f
+        sizes[f] += len(months[k])
+    return fold_of
+
+
+def fold_split(stems: list[str], n_folds: int, fold: int, seed: int = 42) -> tuple[list[str], list[str]]:
+    """(train, validation) stems for one fold of ``month_folds``."""
+    if not 0 <= fold < n_folds:
+        raise ValueError(f"fold must be in 0..{n_folds - 1}")
+    fold_of = month_folds(stems, n_folds, seed)
+    val = sorted(s for s in stems if fold_of[s] == fold)
+    train = sorted(s for s in stems if fold_of[s] != fold)
+    return train, val

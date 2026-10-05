@@ -18,7 +18,7 @@ import numpy as np  # noqa: E402
 
 from solarseg.data import group_by_stem, load_records, read_image, record_union_mask, resolve_paths  # noqa: E402
 from solarseg.infer import get_device, load_checkpoint, predict_image  # noqa: E402
-from solarseg.postprocess import PostConfig, instances_from_prob  # noqa: E402
+from solarseg.postprocess import PostConfig, instances_from_prob, tuned_tta  # noqa: E402
 
 PALETTE = [(255, 99, 71), (65, 105, 225), (255, 215, 0), (186, 85, 211), (0, 206, 209), (255, 140, 0)]
 
@@ -37,10 +37,12 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--run", required=True)
     p.add_argument("--checkpoint", default=None)
+    p.add_argument("--params", default=None, help="post-processing JSON; defaults to <run>/postprocess.json")
     p.add_argument("--data-root", default=None)
     p.add_argument("--n", type=int, default=4)
     p.add_argument("--panel", type=int, default=768, help="output size of each panel in pixels")
-    p.add_argument("--tta", action="store_true")
+    p.add_argument("--tta", type=int, nargs="?", const=4, default=None,
+                   help="defaults to what the post-processing was tuned with")
     p.add_argument("--out", default=None, help="defaults to <run>/figures")
     p.add_argument("--device", default="auto")
     args = p.parse_args()
@@ -50,8 +52,9 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     device = get_device(args.device)
     model, cfg = load_checkpoint(args.checkpoint or run / "best.pt", device)
-    post_path = run / "postprocess.json"
+    post_path = Path(args.params) if args.params else run / "postprocess.json"
     post = PostConfig.load(post_path) if post_path.exists() else PostConfig()
+    tta = args.tta if args.tta is not None else tuned_tta(post_path)
 
     split = json.loads((run / "split.json").read_text())
     stems = split["val"] or split["train"]
@@ -63,7 +66,8 @@ def main() -> None:
         recs = groups[stem]
         img = read_image(recs[0].image_path)
         prob, disk = predict_image(model, recs[0].image_path, device, cfg.get("scale", 0.5),
-                                   tile=cfg.get("tile", 512), overlap=cfg.get("overlap", 128), tta=args.tta)
+                                   tile=cfg.get("tile", 512), overlap=cfg.get("overlap", 128), tta=tta,
+                                   channels=cfg["channels"])
         labels = instances_from_prob(prob, disk, post)
         base = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         gt_panel, pred_panel = base.copy(), base.copy()
