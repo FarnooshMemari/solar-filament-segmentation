@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from .data import preprocess, read_image
+from .features import parse_channels
 from .model import build_model
 
 
@@ -20,7 +21,9 @@ def get_device(name: str = "auto") -> torch.device:
 def load_checkpoint(path: str | Path, device: torch.device):
     ckpt = torch.load(path, map_location=device, weights_only=False)
     cfg = ckpt.get("config", {})
-    model = build_model(base=cfg.get("base", 32), depth=cfg.get("depth", 4)).to(device)
+    cfg["channels"] = parse_channels(cfg.get("channels"))
+    model = build_model(base=cfg.get("base", 32), depth=cfg.get("depth", 4), in_ch=len(cfg["channels"]))
+    model = model.to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
     return model, cfg
@@ -84,12 +87,14 @@ def predict_prob(
     tta: bool | int = False,
     batch_size: int = 4,
 ) -> np.ndarray:
-    """Normalized image at working resolution -> filament probability (same size).
+    """Network input at working resolution, (H, W) or (C, H, W) -> filament probability (H, W).
 
     ``tta`` averages predictions over flipped (4 views) or flipped and rotated (8 views)
     copies of every tile; training uses the same flips and 90-degree rotations.
     """
-    h, w = x.shape
+    if x.ndim == 2:
+        x = x[None]
+    h, w = x.shape[-2:]
     th, tw = min(tile, h), min(tile, w)
     stride_y, stride_x = max(1, th - overlap), max(1, tw - overlap)
     coords = [(y, xx) for y in _starts(h, th, stride_y) for xx in _starts(w, tw, stride_x)]
@@ -103,9 +108,9 @@ def predict_prob(
 
     for b in range(0, len(coords), batch_size):
         chunk = coords[b : b + batch_size]
-        batch = np.stack([x[y : y + th, xx : xx + tw] for y, xx in chunk])[:, None]
+        batch = np.stack([x[:, y : y + th, xx : xx + tw] for y, xx in chunk]).astype(np.float32)
         inp = torch.from_numpy(batch).to(device)
-        prob = torch.zeros_like(inp, dtype=torch.float32)
+        prob = torch.zeros((inp.shape[0], 1, th, tw), dtype=torch.float32, device=device)
         with torch.autocast(device_type=device.type, enabled=use_amp):
             for k in range(views):
                 prob += _unview(torch.sigmoid(model(_view(inp, k)).float()), k)
@@ -124,10 +129,11 @@ def predict_image(
     tile: int = 512,
     overlap: int = 128,
     tta: bool | int = False,
+    channels=("z",),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Image file -> (full-resolution probability map, full-resolution disk mask)."""
     img = read_image(image_path)
-    x, disk = preprocess(img, scale)
+    x, disk = preprocess(img, scale, channels)
     prob = predict_prob(model, x, device, tile=tile, overlap=overlap, tta=tta)
     if prob.shape != img.shape:
         prob = cv2.resize(prob, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_LINEAR)

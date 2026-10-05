@@ -39,8 +39,8 @@ class CropDataset(Dataset):
     def __getitem__(self, i: int):
         rng = np.random.default_rng((torch.initial_seed() + i) % 2**32)
         k = int(rng.integers(len(self.images)))
-        img, tgt = self.images[k], self.targets[k]
-        h, w = img.shape
+        img, tgt = self.images[k], self.targets[k]  # img is (H, W) or (C, H, W)
+        h, w = img.shape[-2:]
         ch, cw = min(self.crop, h), min(self.crop, w)
         ys, xs = self.positives[k]
         if len(ys) and rng.random() < self.pos_frac:
@@ -53,22 +53,24 @@ class CropDataset(Dataset):
         else:
             y0 = int(rng.integers(0, h - ch + 1))
             x0 = int(rng.integers(0, w - cw + 1))
-        x = img[y0 : y0 + ch, x0 : x0 + cw].astype(np.float32)
+        x = img[..., y0 : y0 + ch, x0 : x0 + cw].astype(np.float32)
         y = tgt[y0 : y0 + ch, x0 : x0 + cw].astype(np.float32)
 
         if self.augment:
             if rng.random() < 0.5:
-                x, y = x[:, ::-1], y[:, ::-1]
+                x, y = x[..., :, ::-1], y[:, ::-1]
             if rng.random() < 0.5:
-                x, y = x[::-1, :], y[::-1, :]
+                x, y = x[..., ::-1, :], y[::-1, :]
             if ch == cw:
                 k90 = int(rng.integers(4))
-                x, y = np.rot90(x, k90), np.rot90(y, k90)
+                x, y = np.rot90(x, k90, axes=(-2, -1)), np.rot90(y, k90)
             # brightness / contrast jitter on the normalized image
             x = x * float(rng.uniform(0.85, 1.15)) + float(rng.uniform(-0.15, 0.15))
             if rng.random() < 0.3:
                 x = x + rng.normal(0, 0.05, x.shape).astype(np.float32)
 
-        x = np.ascontiguousarray(x)[None]
+        x = np.ascontiguousarray(x)
+        if x.ndim == 2:
+            x = x[None]
         y = np.ascontiguousarray(y)[None]
         return torch.from_numpy(x), torch.from_numpy(y)
