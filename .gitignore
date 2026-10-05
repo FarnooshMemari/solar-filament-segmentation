@@ -1,0 +1,14 @@
+# data and outputs stay out of git
+data/
+runs/
+*.pt
+*.pth
+submission*.csv
+*.summary.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
