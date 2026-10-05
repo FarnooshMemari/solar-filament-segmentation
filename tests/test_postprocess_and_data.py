@@ -11,6 +11,7 @@ from solarseg.data import (
     split_stems,
 )
 from solarseg.model import build_model
+from solarseg.infer import _unview, _view, predict_prob
 from solarseg.postprocess import PostConfig, instances_from_prob
 
 
@@ -112,3 +113,42 @@ def test_unet_shapes():
     model = build_model(base=8, depth=3)
     out = model(torch.zeros(2, 1, 100, 76))
     assert out.shape == (2, 1, 100, 76)
+
+
+def test_hysteresis_keeps_only_pieces_with_a_strong_pixel():
+    prob = np.zeros((60, 60), np.float32)
+    prob[5:10, 5:40] = 0.4  # weak piece, never reaches 0.6
+    prob[30:35, 5:40] = 0.4
+    prob[31:34, 20:24] = 0.9  # strong core: the whole 0.4 piece around it is kept
+    cfg = PostConfig(threshold=0.6, low_threshold=0.3, min_area=1)
+    labels = instances_from_prob(prob, None, cfg)
+    assert labels.max() == 1
+    assert (labels > 0).sum() == 5 * 35  # extent comes from the low threshold
+
+
+def test_closing_bridges_small_gaps():
+    prob = np.zeros((40, 80), np.float32)
+    prob[18:22, 5:38] = 0.9
+    prob[18:22, 40:75] = 0.9  # 2 px gap
+    assert instances_from_prob(prob, None, PostConfig(min_area=1)).max() == 2
+    closed = instances_from_prob(prob, None, PostConfig(min_area=1, close_radius=2))
+    assert closed.max() == 1 and closed[19, 38] == 1
+
+
+def test_fill_holes():
+    prob = np.zeros((40, 40), np.float32)
+    prob[10:30, 10:30] = 0.9
+    prob[15:25, 15:25] = 0.0  # hole
+    assert instances_from_prob(prob, None, PostConfig(min_area=1))[20, 20] == 0
+    assert instances_from_prob(prob, None, PostConfig(min_area=1, fill_holes=True))[20, 20] == 1
+
+
+def test_tta_views_are_undone():
+    x = torch.arange(2 * 16, dtype=torch.float32).reshape(2, 1, 4, 4)
+    for k in range(8):
+        assert torch.equal(_unview(_view(x, k), k), x)
+    model = torch.nn.Identity()  # an identity model must give the same map with or without TTA
+    img = np.random.default_rng(0).normal(size=(40, 40)).astype(np.float32)
+    plain = predict_prob(model, img, torch.device("cpu"), tile=16, overlap=4)
+    for views in (4, 8):
+        assert np.allclose(predict_prob(model, img, torch.device("cpu"), tile=16, overlap=4, tta=views), plain, atol=1e-6)

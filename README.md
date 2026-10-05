@@ -21,9 +21,9 @@ false ones, and filaments split into pieces.
 | Labels | Up to three annotators labeled each image and they disagree, so the target is the share of annotators who marked each pixel (a soft label) |
 | Model | Compact U-Net (7.8M parameters) trained from scratch, no external weights |
 | Training | Random 512x512 crops, 70% centered on a filament; flips, rotations, brightness jitter; BCE + Dice loss; AdamW with a one-cycle schedule; mixed precision on GPU |
-| Inference | Sliding window with blended tiles, optional 4-flip test-time augmentation, upsampled to 2048x2048 |
-| Instances | Threshold, keep the disk, optionally join nearby fragments, then connected components; tiny pieces are dropped |
-| Tuning | Threshold, minimum area and fragment merging are chosen to maximize PQ on held-out months |
+| Inference | Sliding window with blended tiles, optional test-time augmentation (4 flips, or 8 flips and rotations), upsampled to 2048x2048 |
+| Instances | Low threshold on the disk, optional gap closing and hole filling, optional joining of nearby fragments, connected components; a piece is kept only if one of its pixels passes the high threshold and it is big enough |
+| Tuning | About 1,600 combinations of those settings are scored on held-out months with the host's PQ counting rule; pieces are encoded and matched once per image, so the search takes minutes |
 | Submission | One COCO RLE per filament, checked for format and overlaps before upload |
 
 Validation holds out whole months of observations, so frames taken hours apart never end
@@ -35,12 +35,15 @@ up on both sides of the split.
 2. Turn on a GPU and Internet in the notebook settings.
 3. Import `notebooks/kaggle_pipeline.ipynb` (or paste its cells) and run all cells.
 
+To redo only the steps after training with an already trained model, use
+`notebooks/kaggle_retune.ipynb` and add the training notebook's output as an input.
+
 Or run the steps yourself:
 
 ```bash
 python scripts/inspect_data.py                           # what the loader sees
 python scripts/train.py --out runs/baseline              # ~50 min on one T4 GPU
-python scripts/tune.py --run runs/baseline               # pick post-processing on validation PQ
+python scripts/tune.py --run runs/baseline --tta 8       # pick post-processing on validation PQ
 python scripts/predict.py --run runs/baseline --out submission.csv
 python scripts/check_submission.py --csv submission.csv  # must print submission=ok
 python scripts/visualize.py --run runs/baseline --n 4    # figures for the report
@@ -63,24 +66,34 @@ pytest -q
 
 ## Results
 
-First full run on Kaggle: one T4 GPU, 30 epochs, about 66 minutes from start to the
-submission file. The model trains on 601 images and is checked on 106 images from
-held-out months.
+The model is trained once on Kaggle (one T4 GPU, 30 epochs, about 50 minutes) on 601
+images and checked on 106 images from held-out months. Validation Dice peaked at 0.713
+at epoch 12 and stayed between 0.69 and 0.71 after that. Both runs below use this model.
 
-| Version | Validation Dice | Validation PQ | Public leaderboard |
+| Run | Post-processing | Validation PQ | Public leaderboard |
 | --- | --- | --- | --- |
-| U-Net baseline (scale 0.5, tuned post-processing) | 0.713 | 0.389 | 0.32 |
+| 1 | Single threshold 0.6, minimum area 400 px, fragments within 10 px joined | 0.389 | 0.32 |
+| 2 | 8-view test-time augmentation; low/high threshold 0.4/0.9, minimum area 300 px, fragments within 10 px joined | 0.410 | 0.34 |
 
-- Best post-processing on validation: threshold 0.6, minimum area 400 px, fragments
-  within 10 px joined (SQ 0.666, RQ 0.583).
-- Validation Dice peaked at epoch 12 and stayed between 0.69 and 0.71 after that.
-- On the test set the model found 1,296 filaments in 180 images, about 7 per image,
-  close to the 7.1 average in the training labels.
+What each change in run 2 added on validation PQ (same model, about 1,600 settings searched):
+
+| Step | Validation PQ |
+| --- | --- |
+| Run 1 settings | 0.389 |
+| + 8-view test-time augmentation | 0.391 |
+| + wider search with a single threshold | 0.401 |
+| + low/high threshold (hysteresis) | 0.410 |
+
+Gap closing and hole filling did not help. Run 2 matches more real filaments (746 vs 691)
+with slightly fewer false ones (448 vs 468), so RQ rose from 0.583 to 0.620 while SQ
+stayed near 0.66. On the test set it found 1,315 filaments in 180 images.
 
 ## Ideas to try next
 
-- Higher thresholds and minimum areas in tuning: the best values in the first run were
-  the largest ones tried
+- High thresholds above 0.9: the best value in run 2 was the largest one tried
+- Pick which pieces to submit with a small model that predicts each piece's matched IoU
+  (a piece raises PQ only if that is above half the current PQ)
+- Extra input channels: limb-darkening correction and local contrast
 - Native resolution (`--scale 1.0`) to keep the thinnest filaments
 - Bigger model (`--base 48`) or longer training
 - A loss that rewards connected shapes (e.g. clDice) to reduce fragmentation

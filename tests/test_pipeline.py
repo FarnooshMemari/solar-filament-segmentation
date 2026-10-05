@@ -23,8 +23,9 @@ def test_synthetic_pipeline(tmp_path):
         "--epochs", "2", "--steps-per-epoch", "4", "--batch-size", "4", "--base", "8", "--depth", "3",
         "--workers", "0", "--val-frac", "0.3", "--tile", "128", "--overlap", "32",
     )
-    run("scripts/tune.py", "--run", run_dir, "--data-root", root,
-        "--thresholds", "0.3,0.5", "--min-areas", "20", "--merge-dists", "0,5")
+    run("scripts/tune.py", "--run", run_dir, "--data-root", root, "--tta", "8", "--workers", "2",
+        "--thresholds", "0.3,0.5", "--low-thresholds", "0.2,0.3", "--min-areas", "20,50",
+        "--merge-dists", "0,5", "--close-radii", "0,3", "--fill-holes", "0,1")
     out = str(tmp_path / "submission.csv")
     run("scripts/predict.py", "--run", run_dir, "--data-root", root, "--out", out,
         "--params", str(Path(run_dir) / "postprocess.json"))

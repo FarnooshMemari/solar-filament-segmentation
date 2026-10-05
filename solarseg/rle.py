@@ -39,14 +39,45 @@ def counts_to_rle(counts: str, height: int = 2048, width: int = 2048) -> dict:
     return {"size": [height, width], "counts": counts.encode("ascii")}
 
 
+def labels_to_rles(labels: np.ndarray) -> tuple[np.ndarray, list[dict]]:
+    """Instance label map -> (label ids present, one compressed RLE per id), in increasing id order.
+
+    COCO RLE stores alternating run lengths of 0s and 1s in column-major order. Instead of
+    building a full 2048 x 2048 mask for every filament, the runs of the whole label map are
+    found once and split by label, which is several times faster on images with many pieces.
+    """
+    h, w = labels.shape
+    flat = np.ravel(labels, order="F")
+    n = flat.size
+    change = np.flatnonzero(flat[1:] != flat[:-1]) + 1
+    starts = np.concatenate(([0], change))
+    ends = np.concatenate((change, [n]))
+    values = flat[starts]
+    fg = values > 0
+    if not fg.any():
+        return np.zeros(0, labels.dtype), []
+    starts, ends, values = starts[fg], ends[fg], values[fg]
+    order = np.argsort(values, kind="stable")  # group runs by label, keep their pixel order
+    starts, ends, values = starts[order], ends[order], values[order]
+    ids, first = np.unique(values, return_index=True)
+    bounds = np.append(first, len(values))
+    uncompressed = []
+    for j in range(len(ids)):
+        s, e = starts[bounds[j] : bounds[j + 1]], ends[bounds[j] : bounds[j + 1]]
+        counts = np.empty(2 * len(s) + 1, np.int64)
+        counts[0] = s[0]  # zeros before the first run
+        counts[1::2] = e - s  # each run of ones
+        counts[2:-1:2] = s[1:] - e[:-1]  # zeros between runs
+        counts[-1] = n - e[-1]  # trailing zeros (left out when there are none)
+        counts = counts if counts[-1] > 0 else counts[:-1]
+        uncompressed.append({"size": [h, w], "counts": counts.tolist()})
+    return ids, mask_utils.frPyObjects(uncompressed, h, w)
+
+
 def labels_to_counts(labels: np.ndarray) -> list[str]:
     """Instance label map (0 = background, 1..K = filaments) -> list of counts strings."""
-    out = []
-    for k in range(1, int(labels.max()) + 1):
-        m = labels == k
-        if m.any():
-            out.append(encode_mask(m))
-    return out
+    _, rles = labels_to_rles(labels)
+    return [r["counts"].decode("ascii") for r in rles]
 
 
 def write_submission(rows: Iterable[tuple[str, str]], path: str | Path) -> int:

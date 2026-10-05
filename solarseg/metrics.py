@@ -1,12 +1,16 @@
 """Panoptic Quality (PQ), pooled over every (image, annotator) pair.
 
-A predicted filament matches a ground-truth filament when their IoU is above 0.5.
-Across all pairs:
+Counting follows the host's self-evaluation notebook exactly:
 
-    PQ = sum(IoU of matched pairs) / (TP + 0.5 * FP + 0.5 * FN)
+* every annotator's labels for an image are scored separately against the same predictions,
+  and all (image, annotator) pairs are pooled;
+* a (ground truth, prediction) pair is a hit when their IoU is above 0.5;
+* TP = number of hits, FP = predictions with no hit, FN = ground-truth filaments with no hit;
 
-This mirrors the host's description. Use the organizers' self-evaluation notebook on
-Kaggle as the final word; this local version is for fast tuning.
+    PQ = sum(IoU of hits) / (TP + 0.5 * FP + 0.5 * FN)
+
+With non-overlapping predictions (which this pipeline always produces) a filament can be hit
+by at most one prediction, so this equals the usual one-to-one PQ.
 """
 from __future__ import annotations
 
@@ -55,29 +59,30 @@ class PQStats:
         }
 
 
+def score_ious(ious: np.ndarray, threshold: float = 0.5) -> PQStats:
+    """PQ counts for one (image, annotator) pair from an (n_pred, n_gt) IoU matrix."""
+    n_pred, n_gt = ious.shape
+    if n_gt == 0:
+        return PQStats(fp=n_pred)
+    if n_pred == 0:
+        return PQStats(fn=n_gt)
+    hit = ious > threshold
+    return PQStats(
+        tp=int(hit.sum()),
+        fp=int((~hit.any(axis=1)).sum()),
+        fn=int((~hit.any(axis=0)).sum()),
+        iou_sum=float(ious[hit].sum()),
+    )
+
+
+def iou_matrix(pred_rles: list[dict], gt_rles: list[dict]) -> np.ndarray:
+    """(n_pred, n_gt) IoU matrix between two lists of COCO RLEs."""
+    if not pred_rles or not gt_rles:
+        return np.zeros((len(pred_rles), len(gt_rles)))
+    ious = mask_utils.iou(pred_rles, gt_rles, [0] * len(gt_rles))
+    return np.asarray(ious, dtype=np.float64).reshape(len(pred_rles), len(gt_rles))
+
+
 def match(pred_rles: list[dict], gt_rles: list[dict], threshold: float = 0.5) -> PQStats:
-    """Match one image's predictions to one annotator's filaments."""
-    if not pred_rles and not gt_rles:
-        return PQStats()
-    if not pred_rles:
-        return PQStats(fn=len(gt_rles))
-    if not gt_rles:
-        return PQStats(fp=len(pred_rles))
-    ious = np.asarray(mask_utils.iou(pred_rles, gt_rles, [0] * len(gt_rles)), dtype=np.float64)
-    ious = ious.reshape(len(pred_rles), len(gt_rles))
-    # greedy one-to-one matching; with IoU > 0.5 and non-overlapping masks it is unique
-    pairs = np.argwhere(ious > threshold)
-    order = np.argsort(-ious[pairs[:, 0], pairs[:, 1]]) if len(pairs) else []
-    used_p, used_g = set(), set()
-    stats = PQStats()
-    for idx in order:
-        p, g = pairs[idx]
-        if p in used_p or g in used_g:
-            continue
-        used_p.add(p)
-        used_g.add(g)
-        stats.tp += 1
-        stats.iou_sum += float(ious[p, g])
-    stats.fp = len(pred_rles) - stats.tp
-    stats.fn = len(gt_rles) - stats.tp
-    return stats
+    """Score one image's predictions against one annotator's filaments."""
+    return score_ious(iou_matrix(pred_rles, gt_rles), threshold)
