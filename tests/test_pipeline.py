@@ -60,6 +60,8 @@ def test_synthetic_kfold_pipeline(tmp_path):
     run("scripts/scorer.py", "--probs", str(probs), "--cache", str(cache), "--runs", *folds,
         "--post", str(final / "postprocess.json"), "--out", str(final), "--data-root", root, "--workers", "2")
     assert (final / "picker.txt").exists() and (final / "picker.json").exists()
+    run("scripts/oof_report.py", "--run", str(final))
+    assert (final / "oof_report.json").exists()
     for picker in (False, True):
         out = str(tmp_path / f"submission_{int(picker)}.csv")
         extra = ["--picker", str(final)] if picker else []
