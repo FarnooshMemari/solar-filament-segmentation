@@ -43,7 +43,7 @@ To redo only the steps after training with an already trained model, use
 
 Run 3 (extra input channels, four fold models, the picker) is
 `notebooks/kaggle_run3.ipynb`. It needs *GPU T4 x2*, trains two folds at a time and takes
-about 3 hours.
+about 3 hours. `notebooks/kaggle_run3_report.ipynb` summarizes its output without a GPU.
 
 Or run the steps yourself:
 
@@ -70,6 +70,7 @@ python scripts/scorer.py --probs /tmp/probs --cache /tmp/cache --post runs/run3/
     --runs runs/fold0 runs/fold1 runs/fold2 runs/fold3 --out runs/run3
 python scripts/predict.py --probs /tmp/probs --cache /tmp/cache --params runs/run3/postprocess.json \
     --picker runs/run3 --out submission.csv                                      # drop --picker for the rule
+python scripts/oof_report.py --run runs/run3   # out-of-fold PQ per fold and on the run 1/2 validation images
 ```
 
 The data folder is found automatically under `/kaggle/input`. Elsewhere, pass
@@ -89,14 +90,21 @@ pytest -q
 
 ## Results
 
-The model is trained once on Kaggle (one T4 GPU, 30 epochs, about 50 minutes) on 601
-images and checked on 106 images from held-out months. Validation Dice peaked at 0.713
-at epoch 12 and stayed between 0.69 and 0.71 after that. Both runs below use this model.
+Runs 1 and 2 use one model trained on Kaggle (one T4 GPU, 30 epochs, about 50 minutes) on
+601 images and checked on 106 images from held-out months. Its validation Dice peaked at
+0.713 at epoch 12 and stayed between 0.69 and 0.71 after that. Run 3 trains four models
+with extra input channels, each holding out a quarter of the months, so every training image
+also gets a prediction from a model that never saw it. The PQ column below is measured on
+the same 106 held-out images for all three runs.
 
-| Run | Post-processing | Validation PQ | Public leaderboard |
+| Run | What changed | PQ on the 106 held-out images | Public leaderboard |
 | --- | --- | --- | --- |
 | 1 | Single threshold 0.6, minimum area 400 px, fragments within 10 px joined | 0.389 | 0.32 |
 | 2 | 8-view test-time augmentation; low/high threshold 0.4/0.9, minimum area 300 px, fragments within 10 px joined | 0.410 | 0.34 |
+| 3 | Extra input channels; four fold models with averaged (EMA) weights; settings tuned on all 707 training images (low/high threshold 0.45/0.97, minimum area 300 px, fragments within 10 px joined); LightGBM picker; test set predicted by averaging the four models | 0.429 | not submitted yet |
+
+Runs 1 and 2 were tuned on those 106 images, which flatters them a little. Run 3's settings
+were tuned on all 707 images, so its number is the more honest one.
 
 What each change in run 2 added on validation PQ (same model, about 1,600 settings searched):
 
@@ -111,8 +119,38 @@ Gap closing and hole filling did not help. Run 2 matches more real filaments (74
 with slightly fewer false ones (448 vs 468), so RQ rose from 0.583 to 0.620 while SQ
 stayed near 0.66. On the test set it found 1,315 filaments in 180 images.
 
+### Run 3 in detail
+
+Out-of-fold PQ, where every image is scored by the model that did not train on it
+(`notebooks/kaggle_run3_report.ipynb` prints all of these):
+
+| Which pieces are kept | All 707 images | The 106 run 1/2 validation images |
+| --- | --- | --- |
+| Every candidate piece | 0.374 | |
+| Low/high threshold rule | 0.412 | 0.424 |
+| LightGBM picker | 0.415 | 0.429 |
+| A picker that knows each piece's true IoU (upper bound) | 0.486 | |
+
+- The four models reach validation Dice 0.712, 0.722, 0.707 and 0.708 (best at epoch 15 or
+  20 of 40). Training all four and saving their maps took 125 minutes on two T4 GPUs; the
+  whole notebook, 2 h 21 min.
+- PQ per fold with the picker: 0.4166, 0.4235, 0.4021 and 0.4182, so the gain holds across months.
+- The picker keeps fewer pieces than the rule (6.4 per image vs 7.0; the annotators mark 7.4
+  on average). It removes 18% of the false detections (2,506 vs 3,066) and loses 4% of the
+  matches (4,815 vs 5,022).
+- Its most useful inputs are the mean and peak probability of the piece, the share of
+  confident pixels and the dark-ridge channel.
+- Matched filaments are outlined with a median IoU of 0.673; half of them fall between 0.602
+  and 0.735.
+- On the test set it keeps 1,136 filaments in 180 images (the rule keeps 1,158).
+
 ## Ideas to try next
 
+- High thresholds above 0.97: the best value was again the largest one tried
+- Tune on averaged maps: the test set is predicted by averaging four models, while the
+  settings are tuned on single-model maps
+- Better piece features: the gap between the picker (0.415) and the upper bound (0.486) is
+  still large
 - Native resolution (`--scale 1.0`) to keep the thinnest filaments
 - Bigger model (`--base 48`)
 - A loss that rewards connected shapes (e.g. clDice) to reduce fragmentation
@@ -136,8 +174,8 @@ solarseg/            library code
   metrics.py         Panoptic Quality
   rle.py             masks <-> submission CSV
 scripts/             one command per step (inspect, cache, train, oof, tune, scorer, predict,
-                     check, visualize)
-notebooks/           Kaggle notebooks: full pipeline, re-tune, run 3
+                     check, visualize, oof_report)
+notebooks/           Kaggle notebooks: full pipeline, re-tune, run 3 and its report
 tests/               unit tests and an end-to-end run on synthetic data
 ```
 
