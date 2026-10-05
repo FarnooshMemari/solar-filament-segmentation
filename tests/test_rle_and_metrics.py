@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from solarseg.metrics import PQStats, match
+from solarseg.metrics import PQStats, match, score_ious
 from solarseg.rle import (
     counts_to_rle,
     decode_counts,
@@ -66,3 +66,28 @@ def test_pq_partial_overlap():
     far = blob(50, 50, 30, 40, 30, 40)
     stats = match([rle(far)], [rle(gt)])  # no overlap: one FP and one FN
     assert (stats.tp, stats.fp, stats.fn) == (0, 1, 1)
+
+
+def test_labels_to_counts_matches_one_mask_at_a_time():
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        h, w = (int(v) for v in rng.integers(1, 30, 2))
+        labels = np.zeros((h, w), np.int32)
+        for _ in range(int(rng.integers(0, 6))):
+            y, x = int(rng.integers(0, h)), int(rng.integers(0, w))
+            labels[y : y + int(rng.integers(1, h + 1)), x : x + int(rng.integers(1, w + 1))] = rng.integers(1, 9)
+        if rng.random() < 0.3:
+            labels[0, 0] = 2  # run starting at the first pixel
+        if rng.random() < 0.3:
+            labels[-1, -1] = 4  # run ending at the last pixel
+        expected = [encode_mask(labels == k) for k in range(1, int(labels.max()) + 1) if (labels == k).any()]
+        assert labels_to_counts(labels) == expected
+
+
+def test_host_counting_rule():
+    # every (gt, prediction) pair with IoU > 0.5 is a hit; unmatched rows/columns are FP/FN
+    ious = np.array([[0.9, 0.0], [0.0, 0.3], [0.0, 0.0]])  # 3 predictions x 2 filaments
+    st = score_ious(ious)
+    assert (st.tp, st.fp, st.fn) == (1, 2, 1)
+    assert st.pq == pytest.approx(0.9 / (1 + 0.5 * 2 + 0.5 * 1))
+    assert (score_ious(np.zeros((0, 3))).fn, score_ious(np.zeros((2, 0))).fp) == (3, 2)
