@@ -21,9 +21,9 @@ false ones, and filaments split into pieces.
 | Labels | Up to three annotators labeled each image and they disagree, so the target is the share of annotators who marked each pixel (a soft label) |
 | Model | Compact U-Net (7.8M parameters) trained from scratch, no external weights |
 | Training | Random 512x512 crops, 70% centered on a filament; flips, rotations, brightness jitter; BCE + Dice loss; AdamW with a one-cycle schedule; mixed precision on GPU |
-| Inference | Sliding window with blended tiles, optional 4-flip test-time augmentation, upsampled to 2048x2048 |
-| Instances | Threshold, keep the disk, optionally join nearby fragments, then connected components; tiny pieces are dropped |
-| Tuning | Threshold, minimum area and fragment merging are chosen to maximize PQ on held-out months |
+| Inference | Sliding window with blended tiles, optional test-time augmentation (4 flips, or 8 flips and rotations), upsampled to 2048x2048 |
+| Instances | Low threshold on the disk, optional gap closing and hole filling, optional joining of nearby fragments, connected components; a piece is kept only if one of its pixels passes the high threshold and it is big enough |
+| Tuning | About 1,600 combinations of those settings are scored on held-out months with the host's PQ counting rule; pieces are encoded and matched once per image, so the search takes minutes |
 | Submission | One COCO RLE per filament, checked for format and overlaps before upload |
 
 Validation holds out whole months of observations, so frames taken hours apart never end
@@ -35,12 +35,15 @@ up on both sides of the split.
 2. Turn on a GPU and Internet in the notebook settings.
 3. Import `notebooks/kaggle_pipeline.ipynb` (or paste its cells) and run all cells.
 
+To redo only the steps after training with an already trained model, use
+`notebooks/kaggle_retune.ipynb` and add the training notebook's output as an input.
+
 Or run the steps yourself:
 
 ```bash
 python scripts/inspect_data.py                           # what the loader sees
 python scripts/train.py --out runs/baseline              # ~50 min on one T4 GPU
-python scripts/tune.py --run runs/baseline               # pick post-processing on validation PQ
+python scripts/tune.py --run runs/baseline --tta 8       # pick post-processing on validation PQ
 python scripts/predict.py --run runs/baseline --out submission.csv
 python scripts/check_submission.py --csv submission.csv  # must print submission=ok
 python scripts/visualize.py --run runs/baseline --n 4    # figures for the report
