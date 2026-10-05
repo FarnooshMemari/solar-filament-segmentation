@@ -39,7 +39,7 @@ Or run the steps yourself:
 
 ```bash
 python scripts/inspect_data.py                           # what the loader sees
-python scripts/train.py --out runs/baseline              # ~30-45 min on one GPU
+python scripts/train.py --out runs/baseline              # ~50 min on one T4 GPU
 python scripts/tune.py --run runs/baseline               # pick post-processing on validation PQ
 python scripts/predict.py --run runs/baseline --out submission.csv
 python scripts/check_submission.py --csv submission.csv  # must print submission=ok
@@ -63,12 +63,24 @@ pytest -q
 
 ## Results
 
-| Version | Validation PQ | Public leaderboard |
-| --- | --- | --- |
-| U-Net baseline (scale 0.5, tuned post-processing) | TBD | TBD |
+First full run on Kaggle: one T4 GPU, 30 epochs, about 66 minutes from start to the
+submission file. The model trains on 601 images and is checked on 106 images from
+held-out months.
+
+| Version | Validation Dice | Validation PQ | Public leaderboard |
+| --- | --- | --- | --- |
+| U-Net baseline (scale 0.5, tuned post-processing) | 0.713 | 0.389 | 0.32 |
+
+- Best post-processing on validation: threshold 0.6, minimum area 400 px, fragments
+  within 10 px joined (SQ 0.666, RQ 0.583).
+- Validation Dice peaked at epoch 12 and stayed between 0.69 and 0.71 after that.
+- On the test set the model found 1,296 filaments in 180 images, about 7 per image,
+  close to the 7.1 average in the training labels.
 
 ## Ideas to try next
 
+- Higher thresholds and minimum areas in tuning: the best values in the first run were
+  the largest ones tried
 - Native resolution (`--scale 1.0`) to keep the thinnest filaments
 - Bigger model (`--base 48`) or longer training
 - A loss that rewards connected shapes (e.g. clDice) to reduce fragmentation
